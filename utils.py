@@ -43,27 +43,57 @@ def display_tool_calls(tool_calls_container, tools):
 
     Args:
         tool_calls_container: Streamlit container to display the tool calls
-        tools: List of tool call dictionaries containing name, args, content, and metrics
+        tools: List of tool call dictionaries or objects containing name, args, content, and metrics
     """
     if not tools:
         return
 
     with tool_calls_container.container():
         for tool_call in tools:
-            # Handle different tool call formats
-            _tool_name = (
-                tool_call.get("tool_name") or tool_call.get("name") or "Unknown Tool"
-            )
-            _tool_args = tool_call.get("tool_args") or tool_call.get("arguments") or {}
-            _content = tool_call.get("content") or tool_call.get("result", "")
-            _metrics = tool_call.get("metrics", {})
+            # Handle different tool call formats - both dict and object types
+            
+            # Initialize default values
+            _tool_name = "Unknown Tool"
+            _tool_args = {}
+            _content = ""
+            _metrics = {}
 
-            # Handle function objects
-            if hasattr(tool_call, "function") and tool_call.function:
-                if hasattr(tool_call.function, "name"):
-                    _tool_name = tool_call.function.name
-                if hasattr(tool_call.function, "arguments"):
-                    _tool_args = tool_call.function.arguments
+            # Handle ToolExecution objects (new format)
+            if hasattr(tool_call, '__dict__'):
+                # It's an object, get attributes directly
+                _tool_name = getattr(tool_call, 'tool_name', None) or getattr(tool_call, 'name', 'Unknown Tool')
+                _tool_args = getattr(tool_call, 'tool_args', {}) or getattr(tool_call, 'arguments', {})
+                _content = getattr(tool_call, 'content', '') or getattr(tool_call, 'result', '')
+                _metrics = getattr(tool_call, 'metrics', {})
+                
+                # Handle function objects within the tool call
+                if hasattr(tool_call, 'function') and tool_call.function:
+                    if hasattr(tool_call.function, 'name'):
+                        _tool_name = tool_call.function.name
+                    if hasattr(tool_call.function, 'arguments'):
+                        _tool_args = tool_call.function.arguments
+            
+            # Handle dictionary format (legacy format)
+            elif isinstance(tool_call, dict):
+                _tool_name = (
+                    tool_call.get("tool_name") or tool_call.get("name") or "Unknown Tool"
+                )
+                _tool_args = tool_call.get("tool_args") or tool_call.get("arguments") or {}
+                _content = tool_call.get("content") or tool_call.get("result", "")
+                _metrics = tool_call.get("metrics", {})
+
+                # Handle function objects
+                if "function" in tool_call and tool_call["function"]:
+                    func = tool_call["function"]
+                    if isinstance(func, dict):
+                        if "name" in func:
+                            _tool_name = func["name"]
+                        if "arguments" in func:
+                            _tool_args = func["arguments"]
+                    elif hasattr(func, "name"):
+                        _tool_name = func.name
+                        if hasattr(func, "arguments"):
+                            _tool_args = func.arguments
 
             # Safely create the title with a default if tool name is None
             title = f"🛠️ {_tool_name.replace('_', ' ').title() if _tool_name else 'Tool Call'}"
@@ -76,7 +106,6 @@ def display_tool_calls(tool_calls_container, tools):
                     try:
                         # Try to parse as JSON
                         import json
-
                         args_dict = json.loads(_tool_args)
                         st.markdown("**Arguments:**")
                         st.json(args_dict)
@@ -95,8 +124,15 @@ def display_tool_calls(tool_calls_container, tools):
                         st.json(_content)
                     else:
                         try:
-                            st.json(_content)
-                        except Exception:
+                            # Try to parse as JSON if it's a string
+                            import json
+                            if isinstance(_content, str):
+                                parsed_content = json.loads(_content)
+                                st.json(parsed_content)
+                            else:
+                                st.json(_content)
+                        except:
+                            # If not valid JSON, display as markdown
                             st.markdown(_content)
 
                 if _metrics:

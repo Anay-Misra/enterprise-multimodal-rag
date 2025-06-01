@@ -1,6 +1,12 @@
 import os
 import tempfile
 from typing import List
+import json
+from datetime import datetime
+
+# Load environment variables FIRST
+from dotenv import load_dotenv
+load_dotenv()
 
 import nest_asyncio
 import requests
@@ -23,6 +29,14 @@ from utils import (
     session_selector_widget,
 )
 
+# Import evaluation module
+try:
+    from rag_evaluator import RAGEvaluator, RAGEvaluationDataset
+    EVALUATION_AVAILABLE = True
+except ImportError:
+    EVALUATION_AVAILABLE = False
+    st.warning("⚠️ Evaluation module not found. Please create rag_evaluator.py for evaluation features.")
+
 nest_asyncio.apply()
 st.set_page_config(
     page_title="EnterpriseGPT",
@@ -32,7 +46,6 @@ st.set_page_config(
 )
 
 # Add custom CSS
-
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
@@ -55,6 +68,364 @@ def get_reader(file_type: str):
     return readers.get(file_type.lower(), None)
 
 
+def run_evaluation_interface():
+    """Create evaluation interface in sidebar"""
+    if not EVALUATION_AVAILABLE:
+        return
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### 📊 Evaluation & Testing")
+    
+    # Initialize evaluation state
+    if "evaluation_results" not in st.session_state:
+        st.session_state.evaluation_results = []
+    
+    # Evaluation options
+    eval_type = st.sidebar.selectbox(
+        "Evaluation Type",
+        ["Quick Evaluation", "Comprehensive", "Model Comparison", "Custom Dataset"],
+        key="eval_type_selector"
+    )
+    
+    # Quick Evaluation
+    if eval_type == "Quick Evaluation":
+        if st.sidebar.button("🚀 Run Quick Eval", key="quick_eval_btn"):
+            run_quick_evaluation()
+    
+    # Comprehensive Evaluation  
+    elif eval_type == "Comprehensive":
+        num_questions = st.sidebar.slider("Number of Questions", 3, 10, 5)
+        if st.sidebar.button("📊 Run Comprehensive", key="comp_eval_btn"):
+            run_comprehensive_evaluation(num_questions)
+    
+    # Model Comparison
+    elif eval_type == "Model Comparison":
+        available_models = [
+            "openai:gpt-4o",
+            "openai:o3-mini", 
+            "anthropic:claude-3-5-sonnet-20241022",
+            "google:gemini-2.0-flash-exp",
+            "groq:llama-3.3-70b-versatile"
+        ]
+        
+        selected_models = st.sidebar.multiselect(
+            "Select Models to Compare",
+            available_models,
+            default=available_models[:2]
+        )
+        
+        if st.sidebar.button("🔄 Compare Models", key="compare_models_btn") and selected_models:
+            run_model_comparison(selected_models)
+    
+    # Custom Dataset
+    elif eval_type == "Custom Dataset":
+        uploaded_eval_file = st.sidebar.file_uploader(
+            "Upload Evaluation Dataset (JSON)",
+            type=["json"],
+            key="eval_dataset_upload"
+        )
+        
+        if uploaded_eval_file and st.sidebar.button("📝 Run Custom Eval", key="custom_eval_btn"):
+            run_custom_evaluation(uploaded_eval_file)
+    
+    # Display recent results
+    if st.session_state.evaluation_results:
+        st.sidebar.markdown("#### 📈 Recent Results")
+        latest_result = st.session_state.evaluation_results[-1]
+        
+        with st.sidebar.expander("Latest Evaluation", expanded=False):
+            st.write(f"**Timestamp:** {latest_result.get('timestamp', 'Unknown')}")
+            if latest_result.get('accuracy_score'):
+                st.write(f"**Accuracy:** {latest_result['accuracy_score']:.2f}/10")
+            if latest_result.get('reliability_score'):
+                st.write(f"**Reliability:** {latest_result['reliability_score']:.1f}%")
+        
+        # Download results
+        if st.sidebar.download_button(
+            "💾 Download Results",
+            json.dumps(st.session_state.evaluation_results, indent=2),
+            file_name=f"rag_evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            key="download_eval_results"
+        ):
+            st.sidebar.success("📊 Evaluation results downloaded!")
+
+
+def run_quick_evaluation():
+    """Run a quick 3-question evaluation"""
+    try:
+        with st.spinner("🔍 Running Quick Evaluation..."):
+            agent = st.session_state.get("agentic_rag_agent")
+            if not agent:
+                st.error("❌ No agent found. Please initialize the system first.")
+                return
+            
+            evaluator = RAGEvaluator(agent)
+            
+            # Create mini dataset for quick eval that requires knowledge base usage
+            quick_dataset = RAGEvaluationDataset(
+                questions=[
+                    "What specific content is in the knowledge base? Use search_knowledge_base tool.",
+                    "Can you summarize the main topics from the documents? Search the knowledge base.",
+                    "What can you tell me about the content you have access to? Use the search tool."
+                ],
+                contexts=[
+                    "Knowledge base contains uploaded documents and web content",
+                    "System uses RAG with vector search and language models",
+                    "Assistant helps with document analysis and question answering"
+                ],
+                expected_answers=[
+                    "The knowledge base contains specific documents that should be retrieved and described",
+                    "Main topics should be extracted from actual knowledge base content",
+                    "Content description should be based on actual knowledge base search results"
+                ],
+                ground_truths=[
+                    "Document repository with user uploads",
+                    "Knowledge base topic summary",
+                    "Available content description"
+                ]
+            )
+            
+            result = evaluator.run_comprehensive_evaluation(quick_dataset)
+            
+            # Store result
+            result_dict = {
+                "timestamp": result.timestamp,
+                "type": "Quick Evaluation",
+                "accuracy_score": result.accuracy_score,
+                "reliability_score": result.reliability_score,
+                "performance_metrics": result.performance_metrics,
+                "custom_metrics": result.custom_metrics
+            }
+            st.session_state.evaluation_results.append(result_dict)
+            
+            # Display results
+            st.success("✅ Quick evaluation completed!")
+            display_evaluation_results(result_dict)
+            
+    except Exception as e:
+        st.error(f"❌ Evaluation failed: {str(e)}")
+
+
+def run_comprehensive_evaluation(num_questions: int):
+    """Run comprehensive evaluation with specified number of questions"""
+    try:
+        with st.spinner(f"📊 Running Comprehensive Evaluation ({num_questions} questions)..."):
+            agent = st.session_state.get("agentic_rag_agent")
+            if not agent:
+                st.error("❌ No agent found. Please initialize the system first.")
+                return
+            
+            evaluator = RAGEvaluator(agent)
+            result = evaluator.run_comprehensive_evaluation()
+            
+            # Store result
+            result_dict = {
+                "timestamp": result.timestamp,
+                "type": f"Comprehensive ({num_questions} questions)",
+                "accuracy_score": result.accuracy_score,
+                "reliability_score": result.reliability_score,
+                "performance_metrics": result.performance_metrics,
+                "custom_metrics": result.custom_metrics
+            }
+            st.session_state.evaluation_results.append(result_dict)
+            
+            st.success("✅ Comprehensive evaluation completed!")
+            display_evaluation_results(result_dict)
+            
+    except Exception as e:
+        st.error(f"❌ Evaluation failed: {str(e)}")
+
+
+def run_model_comparison(selected_models: List[str]):
+    """Run comparison between multiple models"""
+    try:
+        with st.spinner(f"🔄 Comparing {len(selected_models)} models..."):
+            agent = st.session_state.get("agentic_rag_agent")
+            if not agent:
+                st.error("❌ No agent found. Please initialize the system first.")
+                return
+            
+            evaluator = RAGEvaluator(agent)
+            results = evaluator.compare_models(selected_models)
+            
+            # Store comparison results
+            comparison_dict = {
+                "timestamp": datetime.now().isoformat(),
+                "type": "Model Comparison",
+                "models": selected_models,
+                "results": {}
+            }
+            
+            for model_id, result in results.items():
+                comparison_dict["results"][model_id] = {
+                    "accuracy_score": result.accuracy_score,
+                    "reliability_score": result.reliability_score,
+                    "performance_metrics": result.performance_metrics
+                }
+            
+            st.session_state.evaluation_results.append(comparison_dict)
+            
+            st.success("✅ Model comparison completed!")
+            display_comparison_results(comparison_dict)
+            
+    except Exception as e:
+        st.error(f"❌ Model comparison failed: {str(e)}")
+
+
+def run_custom_evaluation(uploaded_file):
+    """Run evaluation with custom dataset"""
+    try:
+        with st.spinner("📝 Running Custom Evaluation..."):
+            # Load custom dataset
+            dataset_content = json.loads(uploaded_file.read())
+            custom_dataset = RAGEvaluationDataset(**dataset_content)
+            
+            agent = st.session_state.get("agentic_rag_agent")
+            if not agent:
+                st.error("❌ No agent found. Please initialize the system first.")
+                return
+            
+            evaluator = RAGEvaluator(agent)
+            result = evaluator.run_comprehensive_evaluation(custom_dataset)
+            
+            # Store result
+            result_dict = {
+                "timestamp": result.timestamp,
+                "type": "Custom Dataset",
+                "dataset_size": len(custom_dataset.questions),
+                "accuracy_score": result.accuracy_score,
+                "reliability_score": result.reliability_score,
+                "performance_metrics": result.performance_metrics,
+                "custom_metrics": result.custom_metrics
+            }
+            st.session_state.evaluation_results.append(result_dict)
+            
+            st.success("✅ Custom evaluation completed!")
+            display_evaluation_results(result_dict)
+            
+    except Exception as e:
+        st.error(f"❌ Custom evaluation failed: {str(e)}")
+
+
+def display_evaluation_results(result_dict):
+    """Display evaluation results in the main area"""
+    st.markdown("### 📊 Evaluation Results")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if result_dict.get('accuracy_score'):
+            st.metric(
+                "Accuracy Score", 
+                f"{result_dict['accuracy_score']:.2f}/10",
+                delta=None
+            )
+    
+    with col2:
+        if result_dict.get('reliability_score'):
+            st.metric(
+                "Reliability", 
+                f"{result_dict['reliability_score']:.1f}%",
+                delta=None
+            )
+    
+    with col3:
+        if result_dict.get('performance_metrics'):
+            avg_latency = result_dict['performance_metrics'].get('avg_latency_seconds', 0)
+            st.metric(
+                "Avg Response Time", 
+                f"{avg_latency:.2f}s",
+                delta=None
+            )
+    
+    # Detailed metrics
+    if result_dict.get('custom_metrics'):
+        st.markdown("#### 🎨 Custom RAG Metrics")
+        custom = result_dict['custom_metrics']
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"**Knowledge Base Usage:** {custom.get('knowledge_base_usage', 0):.1f}%")
+            st.write(f"**Response Completeness:** {custom.get('response_completeness', 0):.1f}%")
+        
+        with col2:
+            st.write(f"**Web Search Usage:** {custom.get('web_search_usage', 0):.1f}%")
+            st.write(f"**Tool Diversity:** {custom.get('tool_diversity', 0)} tools")
+
+
+def display_comparison_results(comparison_dict):
+    """Display model comparison results"""
+    st.markdown("### 🔄 Model Comparison Results")
+    
+    results = comparison_dict.get('results', {})
+    
+    # Create comparison table
+    import pandas as pd
+    
+    comparison_data = []
+    for model_id, metrics in results.items():
+        comparison_data.append({
+            'Model': model_id.split(':')[1] if ':' in model_id else model_id,
+            'Accuracy': f"{metrics.get('accuracy_score', 0):.2f}/10" if metrics.get('accuracy_score') else "N/A",
+            'Reliability': f"{metrics.get('reliability_score', 0):.1f}%" if metrics.get('reliability_score') else "N/A",
+            'Avg Latency': f"{metrics.get('performance_metrics', {}).get('avg_latency_seconds', 0):.2f}s" if metrics.get('performance_metrics') else "N/A"
+        })
+    
+    if comparison_data:
+        df = pd.DataFrame(comparison_data)
+        st.dataframe(df, use_container_width=True)
+        
+        # Best performer analysis
+        st.markdown("#### 🏆 Best Performers")
+        
+        # Find best accuracy
+        best_accuracy_model = max(results.items(), 
+                                key=lambda x: x[1].get('accuracy_score', 0) if x[1].get('accuracy_score') else 0)
+        st.write(f"**Best Accuracy:** {best_accuracy_model[0]} ({best_accuracy_model[1].get('accuracy_score', 0):.2f}/10)")
+        
+        # Find best reliability  
+        best_reliability_model = max(results.items(),
+                                   key=lambda x: x[1].get('reliability_score', 0) if x[1].get('reliability_score') else 0)
+        st.write(f"**Best Reliability:** {best_reliability_model[0]} ({best_reliability_model[1].get('reliability_score', 0):.1f}%)")
+
+
+def create_sample_evaluation_dataset():
+    """Create and download a sample evaluation dataset"""
+    sample_dataset = {
+        "questions": [
+            "What is retrieval-augmented generation?",
+            "How does vector search work in RAG systems?", 
+            "What are the benefits of using Qdrant for vector storage?",
+            "How do you evaluate RAG system performance?",
+            "What is the difference between dense and sparse vectors?"
+        ],
+        "contexts": [
+            "RAG combines retrieval and generation to provide accurate, context-aware responses",
+            "Vector search finds similar documents using embedding similarity in high-dimensional space",
+            "Qdrant provides fast vector search with filtering, hybrid search, and cloud deployment options", 
+            "RAG evaluation involves measuring retrieval accuracy, generation quality, and overall system performance",
+            "Dense vectors capture semantic meaning while sparse vectors focus on keyword matching"
+        ],
+        "expected_answers": [
+            "Retrieval-Augmented Generation (RAG) is a technique that combines information retrieval with text generation to provide more accurate and contextual responses.",
+            "Vector search works by converting documents and queries into high-dimensional vectors and finding the most similar ones using distance metrics.",
+            "Qdrant offers benefits like high performance, hybrid search capabilities, easy scaling, and both cloud and on-premise deployment options.",
+            "RAG systems are evaluated using metrics like retrieval accuracy, generation quality, faithfulness, relevance, and performance benchmarks.",
+            "Dense vectors represent semantic meaning in continuous space while sparse vectors use discrete features for keyword-based matching."
+        ],
+        "ground_truths": [
+            "RAG combines retrieval and generation for enhanced AI responses",
+            "Vector similarity search using embeddings in multidimensional space", 
+            "High-performance vector database with hybrid search and scalability",
+            "Multi-dimensional evaluation including accuracy and performance metrics",
+            "Semantic dense vectors vs keyword-focused sparse vectors"
+        ]
+    }
+    
+    return json.dumps(sample_dataset, indent=2)
+
+
 def main():
     ####################################################################
     # App header
@@ -66,14 +437,15 @@ def main():
     )
 
     ####################################################################
-    # Model selector
+    # Model selector (temporarily limited to working models)
     ####################################################################
     model_options = {
         "o3-mini": "openai:o3-mini",
         "gpt-4o": "openai:gpt-4o",
-        "gemini-2.0-flash-exp": "google:gemini-2.0-flash-exp",
-        "claude-3-5-sonnet": "anthropic:claude-3-5-sonnet-20241022",
-        "llama-3.3-70b": "groq:llama-3.3-70b-versatile",
+        # Temporarily disabled due to compatibility issues
+        # "gemini-2.0-flash-exp": "google:gemini-2.0-flash-exp",
+        # "claude-3-5-sonnet": "anthropic:claude-3-5-sonnet-20241022", 
+        # "llama-3.3-70b": "groq:llama-3.3-70b-versatile",
     }
     selected_model = st.sidebar.selectbox(
         "Select a model",
@@ -233,11 +605,13 @@ def main():
             st.sidebar.info(f"{uploaded_file.name} already loaded in knowledge base")
 
     if st.sidebar.button("Clear Knowledge Base"):
+        # For Qdrant, we delete the collection instead of the database
         agentic_rag_agent.knowledge.vector_db.delete()
         st.session_state.loaded_urls.clear()
         st.session_state.loaded_files.clear()
         st.session_state.knowledge_base_initialized = False  # Reset initialization flag
         st.sidebar.success("Knowledge base cleared")
+    
     ###############################################################
     # Sample Question
     ###############################################################
@@ -247,6 +621,23 @@ def main():
             "user",
             "Can you summarize what is currently in the knowledge base (use `search_knowledge_base` tool)?",
         )
+
+    ###############################################################
+    # Evaluation Interface
+    ###############################################################
+    run_evaluation_interface()
+    
+    # Sample dataset download
+    if EVALUATION_AVAILABLE:
+        st.sidebar.markdown("#### 📋 Sample Dataset")
+        if st.sidebar.download_button(
+            "📥 Download Sample Dataset",
+            create_sample_evaluation_dataset(),
+            file_name="sample_rag_evaluation_dataset.json",
+            mime="application/json",
+            key="download_sample_dataset"
+        ):
+            st.sidebar.success("📊 Sample dataset downloaded!")
 
     ###############################################################
     # Utility buttons

@@ -29,6 +29,7 @@ The agent uses:
 View the README for instructions on how to run the application.
 """
 
+import os
 from typing import Optional
 
 from agno.agent import Agent
@@ -40,8 +41,13 @@ from agno.models.groq import Groq
 from agno.models.openai import OpenAIChat
 from agno.storage.agent.postgres import PostgresAgentStorage
 from agno.tools.duckduckgo import DuckDuckGoTools
-from agno.vectordb.pgvector import PgVector
+from agno.vectordb.qdrant import Qdrant
 
+# Qdrant configuration
+qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+qdrant_api_key = os.getenv("QDRANT_API_KEY")  # Optional for local setup
+
+# PostgreSQL URL for session storage (still needed for agent sessions)
 db_url = "postgresql+psycopg://ai:ai@localhost:5532/ai"
 
 
@@ -66,14 +72,13 @@ def get_agentic_rag_agent(
         model = Groq(id=model_name)
     else:
         raise ValueError(f"Unsupported model provider: {provider}")
-    # Define persistent memory for chat history
 
-    # Define the knowledge base
+    # Define the knowledge base with Qdrant
     knowledge_base = AgentKnowledge(
-        vector_db=PgVector(
-            db_url=db_url,
-            table_name="agentic_rag_documents",
-            schema="ai",
+        vector_db=Qdrant(
+            url=qdrant_url,
+            api_key=qdrant_api_key,
+            collection="agentic_rag_documents",
             # Use OpenAI embeddings
             embedder=OpenAIEmbedder(id="text-embedding-3-small"),
         ),
@@ -88,8 +93,8 @@ def get_agentic_rag_agent(
         model=model,
         storage=PostgresAgentStorage(
             table_name="agentic_rag_agent_sessions", db_url=db_url
-        ),  # Persist session data
-        knowledge=knowledge_base,  # Add knowledge base
+        ),  # Keep PostgreSQL for session data
+        knowledge=knowledge_base,  # Add knowledge base with Qdrant
         description="You are a helpful Agent called 'Agentic RAG' and your goal is to assist the user in the best way possible.",
         instructions=[
             "1. Knowledge Base Search:",
@@ -122,7 +127,6 @@ def get_agentic_rag_agent(
         read_chat_history=True,  # This setting gives the model a tool to get chat history
         tools=[DuckDuckGoTools()],
         markdown=True,  # This setting tellss the model to format messages in markdown
-        # add_chat_history_to_messages=True,
         show_tool_calls=True,
         add_history_to_messages=True,  # Adds chat history to messages
         add_datetime_to_instructions=True,

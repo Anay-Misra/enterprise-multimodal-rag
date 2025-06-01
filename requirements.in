@@ -1,9 +1,12 @@
 agno
 anthropic
+deepeval
 duckduckgo_search
 google-genai
 groq
 nest_asyncio
 openai
-sqlalchemy
+pandas
+python-dotenv
+qdrant-client
 streamlit
