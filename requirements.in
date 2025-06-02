@@ -1,15 +1,28 @@
+# Core Agno and LLM dependencies
 agno
-anthropic
-deepeval
-duckduckgo_search
-google-genai
-groq
-nest_asyncio
 openai
+
+# Optional model providers (install as needed)
+# anthropic
+# google-genai  
+# groq
+
+# Vector database and search
+qdrant-client
+duckduckgo_search
+
+# Neo4j graph database (optional)
+# neo4j>=5.0.0
+
+# Web and data processing
+streamlit
 pandas
 python-dotenv
-qdrant-client
-streamlit
+nest_asyncio
+requests
+httpx
+
+# Base dependencies
 pillow>=9.0.0
 base64io
-httpx
+numpy

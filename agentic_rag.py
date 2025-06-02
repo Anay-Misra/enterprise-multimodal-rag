@@ -1,54 +1,61 @@
-"""🤖 Agentic RAG Agent - Your AI Knowledge Assistant!
-
-This advanced example shows how to build a sophisticated RAG (Retrieval Augmented Generation) system that
-leverages vector search and LLMs to provide deep insights from any knowledge base.
-
-The agent can:
-- Process and understand documents from multiple sources (PDFs, websites, text files)
-- Build a searchable knowledge base using vector embeddings
-- Maintain conversation context and memory across sessions
-- Provide relevant citations and sources for its responses
-- Generate summaries and extract key insights
-- Answer follow-up questions and clarifications
-
-Example queries to try:
-- "What are the key points from this document?"
-- "Can you summarize the main arguments and supporting evidence?"
-- "What are the important statistics and findings?"
-- "How does this relate to [topic X]?"
-- "What are the limitations or gaps in this analysis?"
-- "Can you explain [concept X] in more detail?"
-- "What other sources support or contradict these claims?"
-
-The agent uses:
-- Vector similarity search for relevant document retrieval
-- Conversation memory for contextual responses
-- Citation tracking for source attribution
-- Dynamic knowledge base updates
-
-View the README for instructions on how to run the application.
-"""
+"""🤖 Graph RAG Agent with Neo4j Integration"""
 
 import os
-from typing import Optional
+from typing import Optional, List
+import logging
 
 from agno.agent import Agent
 from agno.embedder.openai import OpenAIEmbedder
 from agno.knowledge import AgentKnowledge
-from agno.models.anthropic import Claude
-from agno.models.google import Gemini
-from agno.models.groq import Groq
 from agno.models.openai import OpenAIChat
 from agno.storage.agent.postgres import PostgresAgentStorage
 from agno.tools.duckduckgo import DuckDuckGoTools
 from agno.vectordb.qdrant import Qdrant
+from agno.document import Document
 
-# Qdrant configuration
+# Import models with error handling
+try:
+    from agno.models.anthropic import Claude
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+try:
+    from agno.models.google import Gemini
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
+
+try:
+    from agno.models.groq import Groq
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+
+# Import Neo4j components
+try:
+    from neo4j_integration import (
+        create_neo4j_tools,
+        test_neo4j_connection,
+        EntityExtractor,
+        Neo4jClient,
+        NEO4J_AVAILABLE
+    )
+    GRAPH_RAG_AVAILABLE = True
+except ImportError:
+    GRAPH_RAG_AVAILABLE = False
+    NEO4J_AVAILABLE = False
+
+# Configuration
 qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-qdrant_api_key = os.getenv("QDRANT_API_KEY")  # Optional for local setup
-
-# PostgreSQL URL for session storage (still needed for agent sessions)
+qdrant_api_key = os.getenv("QDRANT_API_KEY")
+neo4j_uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+neo4j_user = os.getenv("NEO4J_USER", "neo4j")
+neo4j_password = os.getenv("NEO4J_PASSWORD", "password")
 db_url = "postgresql+psycopg://ai:ai@localhost:5532/ai"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def get_agentic_rag_agent(
@@ -56,81 +63,105 @@ def get_agentic_rag_agent(
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
     debug_mode: bool = True,
+    enable_graph: bool = True,
 ) -> Agent:
-    """Get an Agentic RAG Agent with Memory."""
-    # Parse model provider and name
+    """Get Graph RAG Agent"""
+    
     provider, model_name = model_id.split(":")
 
-    # Select appropriate model class based on provider
     if provider == "openai":
         model = OpenAIChat(id=model_name)
-    elif provider == "google":
+    elif provider == "google" and GOOGLE_AVAILABLE:
         model = Gemini(id=model_name)
-    elif provider == "anthropic":
+    elif provider == "anthropic" and ANTHROPIC_AVAILABLE:
         model = Claude(id=model_name)
-    elif provider == "groq":
+    elif provider == "groq" and GROQ_AVAILABLE:
         model = Groq(id=model_name)
     else:
-        raise ValueError(f"Unsupported model provider: {provider}")
+        raise ValueError(f"Model {model_id} not available")
 
-    # Define the knowledge base with Qdrant
-    knowledge_base = AgentKnowledge(
-        vector_db=Qdrant(
-            url=qdrant_url,
-            api_key=qdrant_api_key,
-            collection="agentic_rag_documents",
-            # Use OpenAI embeddings
-            embedder=OpenAIEmbedder(id="text-embedding-3-small"),
-        ),
-        num_documents=3,  # Retrieve 3 most relevant documents
+    # Vector database
+    vector_db = Qdrant(
+        url=qdrant_url,
+        api_key=qdrant_api_key,
+        collection="graph_rag_docs",
+        embedder=OpenAIEmbedder(id="text-embedding-3-small"),
     )
 
-    # Create the Agent
-    return Agent(
-        name="agentic_rag_agent",
-        session_id=session_id,  # Track session ID for persistent conversations
+    # Standard knowledge base - NO CUSTOM CLASS
+    knowledge = AgentKnowledge(
+        vector_db=vector_db,
+        num_documents=10
+    )
+
+    # Neo4j tools
+    neo4j_tools = []
+    neo4j_client = None
+    
+    if enable_graph and GRAPH_RAG_AVAILABLE:
+        try:
+            test_result = test_neo4j_connection(neo4j_uri, neo4j_user, neo4j_password)
+            if test_result["connected"]:
+                neo4j_tools, neo4j_client = create_neo4j_tools(neo4j_uri, neo4j_user, neo4j_password)
+                logger.info("✅ Graph RAG enabled")
+            else:
+                logger.warning("❌ Neo4j not connected")
+        except Exception as e:
+            logger.error(f"Neo4j failed: {e}")
+
+    # Tools
+    all_tools = [DuckDuckGoTools()]
+    all_tools.extend(neo4j_tools)
+
+    # Agent
+    agent = Agent(
+        name="graph_rag_agent",
+        session_id=session_id,
         user_id=user_id,
         model=model,
-        storage=PostgresAgentStorage(
-            table_name="agentic_rag_agent_sessions", db_url=db_url
-        ),  # Keep PostgreSQL for session data
-        knowledge=knowledge_base,  # Add knowledge base with Qdrant
-        description="You are a helpful Agent called 'Agentic RAG' and your goal is to assist the user in the best way possible.",
-        instructions=[
-            "1. Knowledge Base Search:",
-            "   - ALWAYS start by searching the knowledge base using search_knowledge_base tool",
-            "   - Analyze ALL returned documents thoroughly before responding",
-            "   - If multiple documents are returned, synthesize the information coherently",
-            "2. External Search:",
-            "   - If knowledge base search yields insufficient results, use duckduckgo_search",
-            "   - Focus on reputable sources and recent information",
-            "   - Cross-reference information from multiple sources when possible",
-            "3. Context Management:",
-            "   - Use get_chat_history tool to maintain conversation continuity",
-            "   - Reference previous interactions when relevant",
-            "   - Keep track of user preferences and prior clarifications",
-            "4. Response Quality:",
-            "   - Provide specific citations and sources for claims",
-            "   - Structure responses with clear sections and bullet points when appropriate",
-            "   - Include relevant quotes from source materials",
-            "   - Avoid hedging phrases like 'based on my knowledge' or 'depending on the information'",
-            "5. User Interaction:",
-            "   - Ask for clarification if the query is ambiguous",
-            "   - Break down complex questions into manageable parts",
-            "   - Proactively suggest related topics or follow-up questions",
-            "6. Error Handling:",
-            "   - If no relevant information is found, clearly state this",
-            "   - Suggest alternative approaches or questions",
-            "   - Be transparent about limitations in available information",
-        ],
-        search_knowledge=True,  # This setting gives the model a tool to search the knowledge base for information
-        read_chat_history=True,  # This setting gives the model a tool to get chat history
-        tools=[DuckDuckGoTools()],
-        markdown=True,  # This setting tellss the model to format messages in markdown
+        storage=PostgresAgentStorage(table_name="graph_rag_sessions", db_url=db_url),
+        knowledge=knowledge,
+        description="Graph RAG Assistant",
+        instructions=["1. ALWAYS search knowledge base thoroughly", "2. When summarizing, analyze ALL documents", 
+                      "3. Use graph tools for entities", "4. Mention document count"],
+        search_knowledge=True,
+        read_chat_history=True,
+        tools=all_tools,
+        markdown=True,
         show_tool_calls=True,
-        add_history_to_messages=True,  # Adds chat history to messages
-        add_datetime_to_instructions=True,
+        add_history_to_messages=True,
         debug_mode=debug_mode,
-        read_tool_call_history=True,
-        num_history_responses=3,
     )
+
+    agent._neo4j_client = neo4j_client
+    return agent
+
+
+def get_graph_rag_statistics(agent):
+    """Get statistics"""
+    return {
+        "vector_db_enabled": True,
+        "graph_db_enabled": bool(getattr(agent, '_neo4j_client', None)),
+        "tools_available": len(agent.tools),
+        "graph_entities": 0,
+        "graph_relationships": 0,
+    }
+
+
+def test_graph_rag_setup():
+    return {
+        "neo4j_integration": GRAPH_RAG_AVAILABLE,
+        "neo4j_library": NEO4J_AVAILABLE,
+        "anthropic_available": ANTHROPIC_AVAILABLE,
+        "google_available": GOOGLE_AVAILABLE,
+        "groq_available": GROQ_AVAILABLE,
+    }
+
+
+def setup_neo4j_docker_instructions():
+    return """
+🐳 **Neo4j Setup:**
+```bash
+pip install neo4j
+docker run -d --name neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/password neo4j:latest
+"""
