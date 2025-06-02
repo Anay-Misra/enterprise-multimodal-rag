@@ -10,3 +10,6 @@ pandas
 python-dotenv
 qdrant-client
 streamlit
+pillow>=9.0.0
+base64io
+httpx
