@@ -46,10 +46,30 @@ except ImportError as e:
     st.error(f"Graph RAG not available: {e}")
     st.stop()
 
+# Import Multimodal Support
+try:
+    from multimodal_readers import (
+        MultimodalReader, ImageReader, AudioReader, VideoReader,
+        get_reader_for_file, read_image, read_audio, read_video
+    )
+    from multimodal_processors import get_missing_dependencies
+    MULTIMODAL_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Multimodal support not available: {e}")
+    MULTIMODAL_AVAILABLE = False
+
+# Import Knowledge Validator
+try:
+    from knowledge_validator import add_knowledge_validator_to_agent, KnowledgeBaseValidator
+    VALIDATOR_AVAILABLE = True
+except ImportError as e:
+    logger.warning(f"Knowledge validator not available: {e}")
+    VALIDATOR_AVAILABLE = True
+
 nest_asyncio.apply()
 st.set_page_config(
-    page_title="Graph RAG Enterprise",
-    page_icon="🕸️",
+    page_title="Multimodal Graph RAG Enterprise",
+    page_icon="🎭",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -67,14 +87,81 @@ def restart_agent():
     st.rerun()
 
 
-def get_reader(file_type: str):
+def get_reader(file_type: str, file_name: str = ""):
     """Return appropriate reader based on file type."""
+    
+    # Check if it's a multimodal file first
+    if MULTIMODAL_AVAILABLE:
+        multimodal_extensions = {
+            # Images
+            'jpg': 'image', 'jpeg': 'image', 'png': 'image', 'bmp': 'image', 
+            'tiff': 'image', 'gif': 'image',
+            # Audio
+            'mp3': 'audio', 'wav': 'audio', 'm4a': 'audio', 'flac': 'audio', 'ogg': 'audio',
+            # Video
+            'mp4': 'video', 'avi': 'video', 'mov': 'video', 'mkv': 'video', 'wmv': 'video'
+        }
+        
+        if file_type.lower() in multimodal_extensions:
+            modality = multimodal_extensions[file_type.lower()]
+            
+            if modality == 'image':
+                return ImageReader(use_vision_model=True, openai_api_key=os.getenv("OPENAI_API_KEY"))
+            elif modality == 'audio':
+                return AudioReader(openai_api_key=os.getenv("OPENAI_API_KEY"))
+            elif modality == 'video':
+                return VideoReader(extract_frames=5, openai_api_key=os.getenv("OPENAI_API_KEY"))
+    
+    # Standard readers for text documents
     readers = {
         "pdf": PDFReader(),
         "csv": CSVReader(),
         "txt": TextReader(),
     }
     return readers.get(file_type.lower(), None)
+
+
+def display_knowledge_base_status():
+    """Display what's actually in the knowledge base"""
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("#### 📚 Knowledge Base Status")
+    
+    agent = st.session_state.get("agentic_rag_agent")
+    
+    if agent and hasattr(agent, 'knowledge') and agent.knowledge:
+        try:
+            # Quick check of knowledge base
+            if hasattr(agent.knowledge, 'vector_db') and agent.knowledge.vector_db:
+                try:
+                    # Try to get basic collection info
+                    vector_db = agent.knowledge.vector_db
+                    collection_name = getattr(vector_db, 'collection', 'default')
+                    
+                    if hasattr(vector_db, 'client') and vector_db.client:
+                        try:
+                            collection_info = vector_db.client.get_collection(collection_name)
+                            doc_count = collection_info.points_count if hasattr(collection_info, 'points_count') else 0
+                            
+                            st.sidebar.write(f"📄 **Documents**: {doc_count}")
+                            
+                            if doc_count == 0:
+                                st.sidebar.warning("⚠️ Knowledge base is empty")
+                                st.sidebar.info("Upload documents to get started")
+                            else:
+                                st.sidebar.success(f"✅ {doc_count} documents loaded")
+                            
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Cannot access collection: {str(e)}")
+                    else:
+                        st.sidebar.warning("⚠️ Vector database not connected")
+                except Exception as e:
+                    st.sidebar.error(f"❌ Knowledge base error: {str(e)}")
+            else:
+                st.sidebar.warning("⚠️ No knowledge base configured")
+        except Exception as e:
+            st.sidebar.error(f"Error checking knowledge base: {str(e)}")
+    else:
+        st.sidebar.info("Initialize agent to see knowledge base status")
 
 
 def display_system_status():
@@ -96,9 +183,33 @@ def display_system_status():
             graph_status = "✅" if stats.get("graph_db_enabled") else "❌"
             st.sidebar.write(f"{graph_status} **Knowledge Graph**: {'Enabled' if stats.get('graph_db_enabled') else 'Disabled'}")
             
+            # Multimodal status
+            mm_status = "✅" if MULTIMODAL_AVAILABLE else "❌"
+            st.sidebar.write(f"{mm_status} **Multimodal**: {'Enabled' if MULTIMODAL_AVAILABLE else 'Disabled'}")
+            
+            # Validation status
+            val_status = "✅" if VALIDATOR_AVAILABLE else "❌"
+            st.sidebar.write(f"{val_status} **Content Validation**: {'Enabled' if VALIDATOR_AVAILABLE else 'Disabled'}")
+            
             # Tools status
             tools_count = stats.get("tools_available", 0)
             st.sidebar.write(f"🛠️ **Tools Available**: {tools_count}")
+            
+            # Show multimodal capabilities
+            if MULTIMODAL_AVAILABLE:
+                with st.sidebar.expander("🎭 Multimodal Capabilities", expanded=False):
+                    reader = MultimodalReader()
+                    capabilities = reader.check_capabilities()
+                    
+                    st.write(f"**Vision Model**: {'✅' if capabilities['vision_model_enabled'] else '❌'}")
+                    st.write(f"**Video Frames**: {capabilities['video_frame_extraction']}")
+                    
+                    if capabilities['missing_dependencies']:
+                        st.write("**Missing:**")
+                        for dep in capabilities['missing_dependencies']:
+                            st.write(f"  - {dep}")
+                    else:
+                        st.write("**Status**: All dependencies available")
             
             # Show graph statistics if available
             if stats.get("graph_db_enabled"):
@@ -117,10 +228,28 @@ def display_setup_instructions():
     if st.session_state.get("show_setup", False):
         st.markdown("### 🐳 Setup Instructions")
         
+        # Neo4j setup
         setup_text = setup_neo4j_docker_instructions()
         st.markdown(setup_text)
         
-        if st.button("Test Connection"):
+        # Multimodal setup
+        if not MULTIMODAL_AVAILABLE:
+            missing_deps = get_missing_dependencies()
+            if missing_deps:
+                st.markdown("#### 🎭 Multimodal Dependencies")
+                st.markdown("Install multimodal support:")
+                st.code(f"pip install {' '.join(missing_deps)}")
+                
+                st.markdown("**Additional system requirements:**")
+                st.markdown("- **Tesseract OCR**: For image text extraction")
+                st.markdown("  - Ubuntu: `sudo apt install tesseract-ocr`")
+                st.markdown("  - macOS: `brew install tesseract`")
+                st.markdown("  - Windows: Download from GitHub releases")
+                st.markdown("- **FFmpeg**: For video processing (optional)")
+                st.markdown("  - Ubuntu: `sudo apt install ffmpeg`")
+                st.markdown("  - macOS: `brew install ffmpeg`")
+        
+        if st.button("Test Connections"):
             with st.spinner("Testing connections..."):
                 test_results = test_graph_rag_setup()
                 
@@ -128,19 +257,86 @@ def display_setup_instructions():
                 for key, value in test_results.items():
                     status = "✅" if value else "❌"
                     st.write(f"{status} {key.replace('_', ' ').title()}: {value}")
+                
+                # Test multimodal
+                if MULTIMODAL_AVAILABLE:
+                    reader = MultimodalReader()
+                    mm_caps = reader.check_capabilities()
+                    mm_status = "✅" if mm_caps['multimodal_available'] else "❌"
+                    st.write(f"{mm_status} Multimodal Support: {mm_caps['multimodal_available']}")
         
         if st.button("Close Instructions"):
             st.session_state["show_setup"] = False
             st.rerun()
 
 
+def handle_multimodal_upload(uploaded_file, file_type):
+    """Handle multimodal file upload and processing"""
+    if not MULTIMODAL_AVAILABLE:
+        st.sidebar.error("Multimodal support not available. Install dependencies.")
+        return None
+    
+    try:
+        alert = st.sidebar.info(f"Processing {file_type} file...", icon="🎭")
+        
+        # Get appropriate reader
+        reader = get_reader(file_type, uploaded_file.name)
+        
+        if reader is None:
+            st.sidebar.error(f"No reader available for {file_type} files")
+            return None
+        
+        # Process the file
+        with st.spinner(f"🎭 Analyzing {file_type} content..."):
+            docs = reader.read(uploaded_file)
+        
+        alert.empty()
+        
+        if docs and len(docs) > 0:
+            # Show processing results in sidebar
+            doc = docs[0]
+            
+            with st.sidebar.expander(f"📄 {uploaded_file.name} Analysis", expanded=True):
+                if doc.meta_data:
+                    modality = doc.meta_data.get('modality', file_type)
+                    st.write(f"**Type**: {modality.title()}")
+                    
+                    if modality == 'image':
+                        if doc.meta_data.get('vision_description'):
+                            st.write("**AI Description**: ✅")
+                        if doc.meta_data.get('ocr_text'):
+                            st.write("**OCR Text**: ✅")
+                    
+                    elif modality == 'audio':
+                        if doc.meta_data.get('transcription'):
+                            duration = doc.meta_data.get('duration', 0)
+                            st.write(f"**Transcription**: ✅ ({duration:.1f}s)")
+                    
+                    elif modality == 'video':
+                        frames = doc.meta_data.get('frames_count', 0)
+                        has_audio = doc.meta_data.get('has_audio', False)
+                        st.write(f"**Frames Analyzed**: {frames}")
+                        st.write(f"**Audio**: {'✅' if has_audio else '❌'}")
+                
+                # Show content preview
+                content_preview = doc.content[:200] + "..." if len(doc.content) > 200 else doc.content
+                st.text_area("Content Preview", content_preview, height=100, disabled=True)
+        
+        return docs
+        
+    except Exception as e:
+        logger.error(f"Error processing {file_type} file: {e}")
+        st.sidebar.error(f"Error processing {file_type}: {str(e)}")
+        return None
+
+
 def main():
     ####################################################################
     # App header
     ####################################################################
-    st.markdown("<h1 class='main-title'>🕸️ Graph RAG Enterprise</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='main-title'>🎭 Multimodal Graph RAG Enterprise</h1>", unsafe_allow_html=True)
     st.markdown(
-        "<p class='subtitle'>Advanced RAG with Neo4j Knowledge Graphs powered by Agno</p>",
+        "<p class='subtitle'>Advanced RAG with Images, Audio, Video + Neo4j Knowledge Graphs powered by Agno</p>",
         unsafe_allow_html=True,
     )
 
@@ -196,6 +392,18 @@ def main():
         if st.sidebar.button("📋 Setup Instructions"):
             st.session_state["show_setup"] = True
 
+    # Multimodal toggle
+    enable_multimodal = st.sidebar.checkbox(
+        "🎭 Enable Multimodal",
+        value=MULTIMODAL_AVAILABLE,
+        disabled=not MULTIMODAL_AVAILABLE,
+        help="Enable image, audio, and video processing"
+    )
+    
+    if not MULTIMODAL_AVAILABLE:
+        if st.sidebar.button("🎭 Install Multimodal"):
+            st.session_state["show_setup"] = True
+
     ####################################################################
     # Initialize Agent
     ####################################################################
@@ -206,23 +414,59 @@ def main():
         or st.session_state.get("current_model") != model_id
         or st.session_state.get("current_graph_setting") != enable_graph
     ):
-        logger.info(f"---*--- Creating new Graph RAG Agent ---*---")
+        logger.info(f"---*--- Creating new Multimodal Graph RAG Agent ---*---")
         
         try:
-            with st.spinner("🚀 Initializing Graph RAG Agent..."):
+            with st.spinner("🚀 Initializing Multimodal Graph RAG Agent..."):
                 agentic_rag_agent = get_agentic_rag_agent(
                     model_id=model_id, 
-                    enable_graph=enable_graph
+                    enable_graph=enable_graph,
+                    enable_multimodal=enable_multimodal
                 )
+                
+                # Add knowledge validator to prevent hallucination
+                if VALIDATOR_AVAILABLE:
+                    agentic_rag_agent = add_knowledge_validator_to_agent(agentic_rag_agent)
+                    logger.info("✅ Knowledge validator added to agent")
                 
                 st.session_state["agentic_rag_agent"] = agentic_rag_agent
                 st.session_state["current_model"] = model_id
                 st.session_state["current_graph_setting"] = enable_graph
+
+                # MANUAL VALIDATOR FIX
+                try:
+                    from knowledge_validator import KnowledgeBaseValidator
+                    
+                    # Create validator manually
+                    validator_tool = KnowledgeBaseValidator(agentic_rag_agent)
+                    
+                    # Add to agent tools directly
+                    tool_names = [getattr(tool, 'name', str(tool)) for tool in agentic_rag_agent.tools]
+                    if 'validate_knowledge_base_contents' not in tool_names:
+                        agentic_rag_agent.tools.append(validator_tool)
+                        logger.info("✅ Validator tool added manually")
+                    
+                    # Update instructions
+                    validation_instruction = "0. ALWAYS use validate_knowledge_base_contents tool BEFORE making claims about document content"
+                    if validation_instruction not in agentic_rag_agent.instructions:
+                        agentic_rag_agent.instructions.insert(0, validation_instruction)
+                    
+                    # Update session state with modified agent
+                    st.session_state["agentic_rag_agent"] = agentic_rag_agent
+                    
+                except Exception as e:
+                    logger.error(f"Manual validator addition failed: {e}")
                 
+                # Success messages
+                success_parts = ["📚 Vector RAG"]
                 if enable_graph and hasattr(agentic_rag_agent, '_neo4j_client') and agentic_rag_agent._neo4j_client:
-                    st.success("✅ Graph RAG Agent initialized with Neo4j!")
-                else:
-                    st.info("📚 Vector RAG Agent initialized")
+                    success_parts.append("🕸️ Knowledge Graph")
+                if enable_multimodal:
+                    success_parts.append("🎭 Multimodal")
+                if VALIDATOR_AVAILABLE:
+                    success_parts.append("🛡️ Content Validation")
+                
+                st.success(f"✅ Agent initialized with {', '.join(success_parts)}!")
                     
         except Exception as e:
             st.error(f"❌ Failed to initialize agent: {str(e)}")
@@ -234,9 +478,10 @@ def main():
         agentic_rag_agent = st.session_state["agentic_rag_agent"]
 
     ####################################################################
-    # Display system status
+    # Display system status and knowledge base status
     ####################################################################
     display_system_status()
+    display_knowledge_base_status()
 
     ####################################################################
     # Load Agent Session
@@ -275,7 +520,7 @@ def main():
             if hasattr(_run, "response") and _run.response is not None:
                 add_message("assistant", _run.response.content, _run.response.tools)
 
-    if prompt := st.chat_input("💬 Ask me anything about your documents or explore the knowledge graph!"):
+    if prompt := st.chat_input("💬 Ask me anything about your documents, images, audio, or explore the knowledge graph!"):
         add_message("user", prompt)
 
     ####################################################################
@@ -327,27 +572,56 @@ def main():
         else:
             st.sidebar.info("URL already loaded")
 
-    # File upload
+    # File upload with multimodal support
+    supported_types = [".pdf", ".csv", ".txt"]
+    if enable_multimodal and MULTIMODAL_AVAILABLE:
+        supported_types.extend([".jpg", ".jpeg", ".png", ".gif", ".mp3", ".wav", ".mp4", ".mov", ".avi"])
+    
+    supported_types_str = ", ".join(supported_types)
+    
     uploaded_file = st.sidebar.file_uploader(
-        "Add a Document (.pdf, .csv, or .txt)", key="file_upload"
+        f"Add a Document ({supported_types_str})", 
+        key="file_upload",
+        type=[ext[1:] for ext in supported_types]  # Remove dots for streamlit
     )
+    
     if uploaded_file and not prompt:
         file_identifier = f"{uploaded_file.name}_{uploaded_file.size}"
         if file_identifier not in st.session_state.loaded_files:
-            alert = st.sidebar.info("Processing document...", icon="ℹ️")
             file_type = uploaded_file.name.split(".")[-1].lower()
-            reader = get_reader(file_type)
-            if reader:
-                docs = reader.read(uploaded_file)
+            
+            # Check if it's a multimodal file
+            multimodal_types = ['jpg', 'jpeg', 'png', 'gif', 'mp3', 'wav', 'mp4', 'mov', 'avi']
+            
+            if file_type in multimodal_types and enable_multimodal:
+                docs = handle_multimodal_upload(uploaded_file, file_type)
+            else:
+                # Standard document processing
+                alert = st.sidebar.info("Processing document...", icon="ℹ️")
+                reader = get_reader(file_type)
+                if reader:
+                    docs = reader.read(uploaded_file)
+                else:
+                    docs = None
+                    st.sidebar.error(f"No reader available for .{file_type} files")
+                alert.empty()
+            
+            if docs:
                 with st.spinner("📊 Processing and building knowledge graph..."):
                     agentic_rag_agent.knowledge.load_documents(docs, upsert=True)
                 st.session_state.loaded_files.add(file_identifier)
-                st.sidebar.success(f"{uploaded_file.name} added to knowledge base")
+                
+                # Show success message based on file type
+                if file_type in multimodal_types:
+                    st.sidebar.success(f"🎭 {uploaded_file.name} processed and added!")
+                else:
+                    st.sidebar.success(f"📄 {uploaded_file.name} added to knowledge base")
+                
                 if enable_graph:
                     st.sidebar.success("🕸️ Knowledge graph updated!")
-            alert.empty()
         else:
             st.sidebar.info(f"{uploaded_file.name} already loaded")
+
     # Display loaded documents
     if st.session_state.loaded_files or st.session_state.loaded_urls:
         st.sidebar.markdown("#### 📄 Loaded Documents")
@@ -356,9 +630,21 @@ def main():
             st.sidebar.markdown("**Files:**")
             for file_id in st.session_state.loaded_files:
                 file_name = file_id.split("_")[0]
+                file_ext = file_name.split(".")[-1].lower()
+                
+                # Choose icon based on file type
+                if file_ext in ['jpg', 'jpeg', 'png', 'gif', 'bmp']:
+                    icon = "🖼️"
+                elif file_ext in ['mp3', 'wav', 'm4a', 'flac']:
+                    icon = "🎵"
+                elif file_ext in ['mp4', 'avi', 'mov', 'mkv']:
+                    icon = "🎬"
+                else:
+                    icon = "📄"
+                
                 col1, col2 = st.sidebar.columns([3, 1])
                 with col1:
-                    st.write(f"📄 {file_name}")
+                    st.write(f"{icon} {file_name}")
                 with col2:
                     if st.button("🗑️", key=f"rm_f_{hash(file_id)}"):
                         st.session_state.loaded_files.remove(file_id)
@@ -375,6 +661,7 @@ def main():
                     if st.button("🗑️", key=f"rm_u_{hash(url)}"):
                         st.session_state.loaded_urls.remove(url)
                         st.rerun()
+
     # Clear knowledge base
     if st.sidebar.button("🧹 Clear All Knowledge"):
         with st.spinner("Clearing all knowledge..."):
@@ -409,20 +696,47 @@ def main():
                 
             except Exception as e:
                 st.sidebar.error(f"Clear failed: {str(e)}")
+
     ###############################################################
-    # Sample Questions
+    # Sample Questions - Enhanced with validation warnings
     ###############################################################
     st.sidebar.markdown("#### ❓ Sample Questions")
     
+    # Check if knowledge base has content
+    has_content = len(st.session_state.loaded_files) > 0 or len(st.session_state.loaded_urls) > 0
+    
+    if not has_content:
+        st.sidebar.warning("⚠️ Upload documents first before asking questions")
+    
+    # Base questions
     sample_questions = [
-        ("📝 Summarize", "Summarize the documents and show key entities"),
-        ("🕸️ Entity Map", "What entities are mentioned and how are they connected?"),
-        ("🔍 Find Relations", "Explore relationships in the knowledge graph"),
-        ("📊 Graph Stats", "Show me knowledge graph statistics")
+        ("📝 Check Content", "What documents are actually in the knowledge base? Use the validation tool first."),
+        ("📊 Summarize", "Summarize only the documents that actually exist in the knowledge base"),
+        ("🕸️ Entity Map", "What entities are mentioned in the actual uploaded documents?"),
+        ("🔍 Find Relations", "Explore relationships from documents that actually exist"),
     ]
     
+    # Add multimodal-specific questions if enabled and content exists
+    if enable_multimodal and MULTIMODAL_AVAILABLE and has_content:
+        # Check if we have multimodal content
+        has_multimodal = any(
+            file_id.split("_")[0].split(".")[-1].lower() in 
+            ['jpg', 'jpeg', 'png', 'gif', 'mp3', 'wav', 'mp4', 'mov', 'avi']
+            for file_id in st.session_state.loaded_files
+        )
+        
+        if has_multimodal:
+            sample_questions.extend([
+                ("🖼️ Image Analysis", "What information was extracted from the actually uploaded images?"),
+                ("🎵 Audio Content", "Summarize the transcribed audio content from uploaded files"),
+                ("🎬 Video Insights", "What was learned from uploaded video files?"),
+                ("🎭 Cross-Modal", "Find connections between uploaded text, image, and audio content"),
+            ])
+    
+    sample_questions.append(("📊 Graph Stats", "Show me knowledge graph statistics"))
+    
     for title, question in sample_questions:
-        if st.sidebar.button(title, key=f"sample_{hash(question)}"):
+        if st.sidebar.button(title, key=f"sample_{hash(question)}", disabled=not has_content and title != "📝 Check Content"):
             add_message("user", question)
 
     ###############################################################
@@ -437,7 +751,7 @@ def main():
         if st.download_button(
             "💾 Export Chat",
             export_chat_history(),
-            file_name="graph_rag_chat_history.md",
+            file_name="multimodal_graph_rag_chat_history.md",
             mime="text/markdown",
             use_container_width=True,
         ):
@@ -467,7 +781,16 @@ def main():
             tool_calls_container = st.empty()
             resp_container = st.empty()
             
-            spinner_text = "🕸️ Thinking and exploring knowledge graph..." if enable_graph else "🤔 Thinking..."
+            # Dynamic spinner text based on enabled features
+            spinner_parts = ["🤔 Thinking"]
+            if enable_graph:
+                spinner_parts.append("🕸️ exploring knowledge graph")
+            if enable_multimodal and any(keyword in question.lower() for keyword in ['image', 'audio', 'video', 'visual', 'sound']):
+                spinner_parts.append("🎭 analyzing multimodal content")
+            if VALIDATOR_AVAILABLE:
+                spinner_parts.append("🛡️ validating content")
+            
+            spinner_text = ", ".join(spinner_parts) + "..."
             
             with st.spinner(spinner_text):
                 response = ""
@@ -494,9 +817,36 @@ def main():
     rename_session_widget(agentic_rag_agent)
 
     ####################################################################
-    # About section
+    # About section - Enhanced
     ####################################################################
-    about_widget()
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ℹ️ About")
+    st.sidebar.markdown("""
+    This **Multimodal Graph RAG Assistant** analyzes documents, images, audio, and video using natural language queries with knowledge graph capabilities.
+
+    **Features:**
+    - 📚 Text documents (PDF, TXT, CSV)
+    - 🖼️ Image analysis (OCR + AI vision)  
+    - 🎵 Audio transcription
+    - 🎬 Video frame analysis
+    - 🕸️ Neo4j knowledge graphs
+    - 🔍 Vector similarity search
+    - 🛡️ Content validation (prevents hallucination)
+
+    Built with:
+    - 🚀 Agno
+    - 💫 Streamlit
+    - 🧠 OpenAI GPT-4 Vision & Whisper
+    - 🗄️ Qdrant Vector DB
+    - 🕸️ Neo4j Graph DB
+    """)
+    
+    # Show current capabilities
+    st.sidebar.markdown("**Current Status:**")
+    st.sidebar.markdown(f"- Vector Search: {'✅' if True else '❌'}")
+    st.sidebar.markdown(f"- Knowledge Graph: {'✅' if enable_graph else '❌'}")
+    st.sidebar.markdown(f"- Multimodal: {'✅' if enable_multimodal and MULTIMODAL_AVAILABLE else '❌'}")
+    st.sidebar.markdown(f"- Content Validation: {'✅' if VALIDATOR_AVAILABLE else '❌'}")
 
 
 if __name__ == "__main__":

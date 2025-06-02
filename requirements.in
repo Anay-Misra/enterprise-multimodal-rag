@@ -4,15 +4,15 @@ openai
 
 # Optional model providers (install as needed)
 # anthropic
-# google-genai  
-# groq
+google-genai  
+groq
 
 # Vector database and search
 qdrant-client
 duckduckgo_search
 
-# Neo4j graph database (optional)
-# neo4j>=5.0.0
+# Neo4j graph database
+neo4j>=5.0.0
 
 # Web and data processing
 streamlit
@@ -22,7 +22,21 @@ nest_asyncio
 requests
 httpx
 
+# Multimodal processing dependencies
+# Image processing
+Pillow>=9.0.0
+pytesseract>=0.3.10
+
+# Audio processing  
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Video processing
+opencv-python>=4.8.0
+
 # Base dependencies
-pillow>=9.0.0
-base64io
 numpy
+base64io
+
+# Evaluation framework
+deepeval
